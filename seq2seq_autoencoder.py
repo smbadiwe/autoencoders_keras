@@ -15,11 +15,12 @@ from keras.models import Model
 
 import tensorflow
 
-from autoencoders_keras.loss_history import LossHistory
+from loss_history import LossHistory
 
-class Seq2SeqAutoencoder(BaseEstimator, 
+
+class Seq2SeqAutoencoder(BaseEstimator,
                          TransformerMixin):
-    def __init__(self, 
+    def __init__(self,
                  input_shape=None,
                  n_epoch=None,
                  batch_size=None,
@@ -31,21 +32,21 @@ class Seq2SeqAutoencoder(BaseEstimator,
                  denoising=None):
         args, _, _, values = inspect.getargvalues(inspect.currentframe())
         values.pop("self")
-        
+
         for arg, val in values.items():
             setattr(self, arg, val)
-        
+
         loss_history = LossHistory()
-        
+
         early_stop = keras.callbacks.EarlyStopping(monitor="val_loss",
                                                    patience=10)
-        
+
         reduce_learn_rate = keras.callbacks.ReduceLROnPlateau(monitor="val_loss",
                                                               factor=0.1,
                                                               patience=20)
-        
+
         self.callbacks_list = [loss_history, early_stop, reduce_learn_rate]
-        
+
         # 2D-lattice with time on the x-axis (across rows) and with space on the y-axis (across columns).
         if self.stateful is True:
             self.input_data = Input(batch_shape=self.input_shape)
@@ -59,9 +60,11 @@ class Seq2SeqAutoencoder(BaseEstimator,
         for i in range(self.encoder_layers):
             if i == 0:
                 # Returns a sequence of n_rows vectors of dimension n_hidden_units.
-                self.encoded = CuDNNLSTM(units=self.n_hidden_units, return_sequences=True, stateful=self.stateful)(self.input_data)
+                self.encoded = CuDNNLSTM(units=self.n_hidden_units, return_sequences=True, stateful=self.stateful)(
+                    self.input_data)
             else:
-                self.encoded = CuDNNLSTM(units=self.n_hidden_units, return_sequences=True, stateful=self.stateful)(self.encoded)
+                self.encoded = CuDNNLSTM(units=self.n_hidden_units, return_sequences=True, stateful=self.stateful)(
+                    self.encoded)
 
         # Returns 1 vector of dimension encoding_dim.
         self.encoded = CuDNNLSTM(units=self.encoding_dim, return_sequences=False, stateful=self.stateful)(self.encoded)
@@ -71,8 +74,9 @@ class Seq2SeqAutoencoder(BaseEstimator,
         self.decoded = RepeatVector(self.n_rows)(self.encoded)
 
         for i in range(self.decoder_layers):
-            self.decoded = CuDNNLSTM(units=self.n_hidden_units, return_sequences=True, stateful=self.stateful)(self.decoded)
-        
+            self.decoded = CuDNNLSTM(units=self.n_hidden_units, return_sequences=True, stateful=self.stateful)(
+                self.decoded)
+
         # If return_sequences is True: 3D tensor with shape (batch_size, timesteps, units).
         # Else: 2D tensor with shape (batch_size, units).
         # Note that n_rows here is timesteps and n_cols here is units.
@@ -85,7 +89,7 @@ class Seq2SeqAutoencoder(BaseEstimator,
         self.autoencoder = Model(self.input_data, self.decoded)
         self.autoencoder.compile(optimizer=keras.optimizers.Adam(),
                                  loss="mean_squared_error")
-            
+
     def fit(self,
             X,
             y=None):
@@ -98,9 +102,9 @@ class Seq2SeqAutoencoder(BaseEstimator,
                              verbose=1)
 
         self.encoder = Model(self.input_data, self.encoded)
-        
+
         return self
-    
+
     def transform(self,
                   X):
         return self.encoder.predict(X)
