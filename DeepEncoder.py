@@ -22,17 +22,23 @@ from tensorflow.python.client import device_lib
 
 from plotnine import *
 
-import matplotlib.pyplot as plt
 from loss_history import LossHistory
 import keras
 from keras import backend as bkend
-from keras_applications import vgg16
+from keras.applications.vgg16 import VGG16  # 138,357,544
 from keras.layers import UpSampling2D, BatchNormalization, Conv2D, MaxPooling2D
 from keras.models import Model, Input, InputLayer
 from keras.optimizers import Adam
 from get_session import get_session
 import keras.backend.tensorflow_backend as KTF
 import inspect
+import glob
+import matplotlib.pyplot as plt
+from data_generator import DataGenerator
+from math import floor
+import pylab
+pylab.rcParams['figure.figsize'] = (8.0, 10.0)
+
 KTF.set_session(get_session(gpu_fraction=0.75, allow_soft_placement=True, log_device_placement=False))
 
 
@@ -40,58 +46,49 @@ class AutoEncoder:
     def __init__(self):
         args, _, _, values = inspect.getargvalues(inspect.currentframe())
         values.pop("self")
+        self.folder = "../../.keras/datasets/coco-test2014/test2014/"
 
         for arg, val in values.items():
             setattr(self, arg, val)
 
     @staticmethod
-    def encoder(input_img):
-        # encoder
-        # input = 28 x 28 x 1 (wide and thin)
-        conv1 = Conv2D(32, (3, 3), activation='relu', padding='same')(input_img)  # 28 x 28 x 32
-        conv1 = BatchNormalization()(conv1)
-        conv1 = Conv2D(32, (3, 3), activation='relu', padding='same')(conv1)
-        conv1 = BatchNormalization()(conv1)
-        pool1 = MaxPooling2D(pool_size=(2, 2))(conv1)  # 14 x 14 x 32
-        conv2 = Conv2D(64, (3, 3), activation='relu', padding='same')(pool1)  # 14 x 14 x 64
-        conv2 = BatchNormalization()(conv2)
-        conv2 = Conv2D(64, (3, 3), activation='relu', padding='same')(conv2)
-        conv2 = BatchNormalization()(conv2)
-        pool2 = MaxPooling2D(pool_size=(2, 2))(conv2)  # 7 x 7 x 64
-        conv3 = Conv2D(128, (3, 3), activation='relu', padding='same')(pool2)  # 7 x 7 x 128 (small and thick)
-        conv3 = BatchNormalization()(conv3)
-        conv3 = Conv2D(128, (3, 3), activation='relu', padding='same')(conv3)
-        conv3 = BatchNormalization()(conv3)
-        conv4 = Conv2D(256, (3, 3), activation='relu', padding='same')(conv3)  # 7 x 7 x 256 (small and thick)
-        conv4 = BatchNormalization()(conv4)
-        conv4 = Conv2D(256, (3, 3), activation='relu', padding='same')(conv4)
-        conv4 = BatchNormalization()(conv4)
-        return conv4
+    def decoder(x):
+        with tf.device("cpu:0"):
+            # # --------latent space (trainable) ------------
+            x = Conv2D(512, (3, 3), activation='relu', padding='same', name='latent')(x)
+
+            encoder_fn = VGG16(include_top=False, weights=None)
+            for i in range(len(encoder_fn.layers) - 1, 0, -1):  # ignore the 1st (input) layer
+                layer = encoder_fn.layers[i]
+                layer.trainable = True
+                if isinstance(layer, MaxPooling2D):
+                    x = UpSampling2D((2, 2))(x)
+                else:  # in vgg, everything is Conv2D
+                    config = layer.get_config()
+                    config['name'] = "d_" + layer.name
+                    x = Conv2D.from_config(config)(x)
+
+            # finally, bring it back to input shape
+            x = Conv2D(3, (3, 3), activation='relu', padding='same', name='dblock1_conv3')(x)
+            return x
 
     @staticmethod
-    def decoder(conv4):
-        # decoder
-        conv5 = Conv2D(128, (3, 3), activation='relu', padding='same')(conv4)  # 7 x 7 x 128
-        conv5 = BatchNormalization()(conv5)
-        conv5 = Conv2D(128, (3, 3), activation='relu', padding='same')(conv5)
-        conv5 = BatchNormalization()(conv5)
-        conv6 = Conv2D(64, (3, 3), activation='relu', padding='same')(conv5)  # 7 x 7 x 64
-        conv6 = BatchNormalization()(conv6)
-        conv6 = Conv2D(64, (3, 3), activation='relu', padding='same')(conv6)
-        conv6 = BatchNormalization()(conv6)
-        up1 = UpSampling2D((2, 2))(conv6)  # 14 x 14 x 64
-        conv7 = Conv2D(32, (3, 3), activation='relu', padding='same')(up1)  # 14 x 14 x 32
-        conv7 = BatchNormalization()(conv7)
-        conv7 = Conv2D(32, (3, 3), activation='relu', padding='same')(conv7)
-        conv7 = BatchNormalization()(conv7)
-        up2 = UpSampling2D((2, 2))(conv7)  # 28 x 28 x 32
-        decoded = Conv2D(1, (3, 3), activation='sigmoid', padding='same')(up2)  # 28 x 28 x 1
-        return decoded
+    def encoder(input_img):
+        with tf.device("cpu:0"):
+            encoder_fn = VGG16(include_top=False, weights='imagenet', input_tensor=input_img)
+            x = None
+            for layer in encoder_fn.layers[1:]:  # ignore the 1st (input) layer
+                layer.trainable = False  # using pre-trained weights for the encoder
+                if x is None:
+                    x = layer(input_img)
+                else:
+                    x = layer(x)
+            return x
 
     def build(self, input_img, loss_fn='mean_squared_error'):
-        autoencoder = Model(input_img, self.decoder(self.encoder(input_img)))
-        autoencoder.compile(loss=loss_fn, optimizer=Adam())
-        return autoencoder
+        m = Model(input_img, self.decoder(self.encoder(input_img)))
+        m.compile(loss=loss_fn, optimizer=Adam())
+        return m
 
     @staticmethod
     def _get_calbacks():
@@ -105,21 +102,54 @@ class AutoEncoder:
         return [loss_history, early_stop, reduce_learn_rate]
 
     def train_autoencoder(self, autoencoder: Model):
+        train, val, test = self.load_dataset()
+        train_gen = DataGenerator(train, data_folder=self.folder)
+        val_gen = DataGenerator(val, data_folder=self.folder)
+        # test_gen = DataGenerator(test, data_folder=self.folder)
+        history = autoencoder.fit_generator(train_gen, use_multiprocessing=True, workers=6,
+                                            epochs=200, validation_data=val_gen,
+                                            verbose=1, callbacks=self._get_calbacks())
+        return history, test
 
-        train_X, valid_X, train_ground, valid_ground = train_test_split(train_data,
-                                                                        train_data,
-                                                                        test_size=0.2,
-                                                                        random_state=13)
-        batch_size = 64
-        epochs = 200
-        inChannel = 1
-        x, y = 28, 28
-        input_img = Input(shape=(x, y, inChannel))
-        num_classes = 10
-        history = autoencoder.fit(train_X, train_ground, batch_size=batch_size, epochs=epochs,
-                                  verbose=1, validation_data=(valid_X, valid_ground),
-                                  callbacks=self._get_calbacks())
-        return history
+    def load_dataset(self):
+        for _, _, files in os.walk(self.folder):
+            sorted(files)
+            ln = len(files) * 0.1
+            tr, va = floor(0.8 * ln), floor(0.95 * ln)
+            return files[:tr], files[tr:va], files[va:]
+
+    def load_coco_image(self):
+
+        with tf.device("cpu:0"):
+            folder = "../../.keras/datasets/coco-test2014/test2014/*"
+            print("folder: " + folder)
+            for f in glob.iglob(folder):
+                # I = plt.imread(f)
+                # print(type(I))
+                # plt.axis('off')
+                # plt.imshow(I)
+                # plt.show()
+                print("file: " + f)
+                from PIL import Image
+                img = Image.open(f)
+                print(type(img))
+                data = np.asarray(img, dtype="uint8")
+                print(data.shape)
+                plt.imshow(data)
+                plt.show()
+                w, h = img.size
+                print(f"w={w}. h={h}")
+                # img = img.resize((224, 224), Image.BICUBIC)
+                # data = np.asarray(img, dtype="uint8")
+                data = self.crop(np.asarray(img, dtype="uint8"))
+                print(data.shape)
+                plt.imshow(data)
+                plt.show()
+                # I = plt.imread(f)
+                # plt.axis('off')
+                # plt.imshow(I)
+                # plt.show()
+                break
 
     @staticmethod
     def visualize(history):
@@ -132,3 +162,19 @@ class AutoEncoder:
         plt.title('Training and validation loss')
         plt.legend()
         plt.show()
+
+
+if __name__ == "__main__":
+    au = AutoEncoder()
+    model = au.build(Input(shape=(224, 224, 3)))
+    hist, test_data = au.train_autoencoder(model)
+
+    # summarize history for loss
+    plt.plot(hist.history['loss'])
+    plt.plot(hist.history['val_loss'])
+    plt.title('model loss')
+    plt.ylabel('loss')
+    plt.xlabel('epoch')
+    plt.legend(['train', 'test'], loc='upper left')
+    plt.show()
+    # print(model.summary())
