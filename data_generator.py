@@ -3,12 +3,23 @@ from keras.utils import Sequence
 from os import path
 from PIL import Image
 from math import floor, ceil
-import tensorflow as tf
+from keras.applications.vgg16 import preprocess_input
 
 
 class DataGenerator(Sequence):
-    def __init__(self, filenames, data_folder, batch_size=32, img_shape=(224, 224, 3),
+    """
+    Data generator, built with COCO test2014 dataset in mind
+    """
+    def __init__(self, filenames, data_folder, batch_size=8, img_shape=(224, 224, 3),
                  shuffle=False):
+        """
+        Initialize data generator, built with COCO test2014 dataset in mind
+        :param filenames:
+        :param data_folder:
+        :param batch_size:
+        :param img_shape:
+        :param shuffle:
+        """
         self.img_shape = img_shape
         self.batch_size = batch_size
         self.data_folder = data_folder
@@ -41,7 +52,14 @@ class DataGenerator(Sequence):
             np.random.shuffle(self.indexes)
 
     def __crop(self, img):
+        if img.ndim == 2:
+            img = np.broadcast_to(img[..., np.newaxis], (img.shape[0], img.shape[1], 3))
         w, h, _ = img.shape
+        # try:
+        #     w, h, _ = img.shape
+        # except Exception:
+        #     print(f"Img shape: {img.shape}")
+        #     raise
         out_w, out_h, _ = self.img_shape
         if out_h > w or out_w > w:
             # up-scaling not supported. This is just cropping.
@@ -77,9 +95,20 @@ class DataGenerator(Sequence):
         # Generate data
         for i, file in enumerate(filenames):
             img = Image.open(path.join(self.data_folder, file))
-            # crop and store sample
-            data = self.__crop(np.asarray(img, dtype="uint8"))
-
-            X[i, ] = data
-
+            w, h = img.size
+            if w < 224 or h < 224:
+                continue
+            try:
+                # crop and store sample
+                data = np.asarray(img, dtype="uint8")
+                if data.ndim == 2:
+                    continue
+                if np.max(data) == 0:
+                    print(f"file {file} HAS ALL ZEROs. Moving on")
+                    continue
+                data = self.__crop(data)
+                X[i, ] = preprocess_input(data, mode="tf")
+            except:
+                print(f"file {file} failed. Moving on")
+                continue
         return X
